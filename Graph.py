@@ -7,7 +7,7 @@ from tqdm import tqdm
 import gzip
 import io
 
-# update: just changed columns category, index to source, destination
+# update: just changed columns [category, index] to [source, destination]
 
 class SnapGraph:
     def __init__(self, data_dir="./data/", verbose=True):
