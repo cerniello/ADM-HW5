@@ -7,6 +7,7 @@ from tqdm import tqdm
 import gzip
 import io
 
+# update: just changed columns category, index to source, destination
 
 class SnapGraph:
     def __init__(self, data_dir="./data/", verbose=True):
@@ -44,7 +45,7 @@ class SnapGraph:
         graph_data = pd.read_csv(graph_data, sep="\t",
                                  header=None, index_col=None,
                                  compression=compression)
-        graph_data.columns = ["category", "index"]
+        graph_data.columns = ["source", "destination"]
 
         if isfile(cat):
             f = open(cat)
