@@ -9,6 +9,7 @@ import io
 from collections import defaultdict
 from heapdict import heapdict
 
+# update: just changed columns [category, index] to [source, destination]
 
 class SnapGraph:
     def __init__(self, data_dir="./data/", verbose=True):
@@ -276,3 +277,4 @@ class SnapGraph:
 if __name__ == '__main__':
     snap_graph = SnapGraph()
     snap_graph.build_graph()
+
