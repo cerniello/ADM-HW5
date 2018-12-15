@@ -184,7 +184,7 @@ class SnapGraph:
             f = io.TextIOWrapper(io.BufferedReader(gzip.open(page_names + ".gz")))
         else:
             url = "https://snap.stanford.edu/data/wiki-topcats-page-names.txt.gz"
-            self._download_file(url, fname=self.page_names_fname)
+            self._download_file(url, fname=self.page_names_fname + ".gz")
             f = io.TextIOWrapper(io.BufferedReader(gzip.open(page_names + ".gz")))
 
         total = SnapGraph.get_num_lines(f)
@@ -387,7 +387,7 @@ class SnapGraph:
 
         # Total size in bytes.
         total_size = int(r.headers.get('content-length', 0))
-        with open(self.data_dir + fname + ".txt", write_mode) as f:
+        with open(self.data_dir + fname, write_mode) as f:
             with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024) as pbar:
                 for data in r.iter_content(32 * 1024):
                     f.write(data)
