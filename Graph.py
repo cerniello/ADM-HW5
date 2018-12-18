@@ -8,87 +8,8 @@ import gzip
 import io
 from collections import defaultdict
 from heapdict import heapdict
-
-
-# nodes = list(range(100))
-# graph = dict()
-# for k in nodes:
-#     graph[k] = dict()
-#
-# for i in nodes:
-#     for j in nodes:
-#         if np.random.choice([0,1], p=[0.5, 0.5]):
-#             graph[i][j] = 1
-#
-#
-# def dijkstra(src, trgts=None):
-#     """
-#     Compute the shortest distance from the source vertex to the target
-#     according to the dijkstra algorithm.
-#
-#     :param src: int, the number of the source vertex
-#     :param trgts: list, the number of the target vertices that are wanted.
-#                         If None, all distances will be calculated.
-#     :return: int, the distance
-#     """
-#
-#     if src not in nodes:
-#         return [float("inf")] * len(trgts)
-#
-#     trgts_dists = dict()
-#     rem_trgts = []
-#     # some articles do not have any edge going in or going out.
-#     # -> Unreachable
-#     for trgt in trgts:
-#         if trgt not in nodes:
-#             trgts_dists[trgt] = float("inf")
-#         else:
-#             rem_trgts.append(trgt)
-#
-#     # a heap dictionary to keep track of the next closest
-#     # vertex in the nodes. Serves as a priority queue to speed
-#     # up the algorithm.
-#     dist_heap = heapdict()
-#     for v in nodes:
-#         dist_heap[v] = float("inf")
-#     dist_heap[src] = 0
-#
-#     final_dists = dict()
-#
-#     for _ in range(len(nodes)):
-#
-#         # Pick minimum distance vertex from
-#         # unprocessed vertices
-#         # u = src in first iteration
-#         u, dist = dist_heap.popitem()
-#
-#         # the dist to u is now final
-#         final_dists[u] = dist
-#         if u in rem_trgts:
-#             trgts_dists[u] = dist
-#             rem_trgts.remove(u)
-#
-#         # if all target distances have been found
-#         if not rem_trgts:
-#             break
-#
-#         # Update dist value of the adjacent vertices
-#         # of the picked vertex only if the current
-#         # distance is greater than new distance and
-#         # the vertex is not in the shortest path tree
-#         for v in graph[u]:
-#             if v not in final_dists:
-#                 dist_add = graph[u][v]
-#                 if dist_add > 0:
-#                     new_dist = dist + dist_add
-#                     if dist_heap[v] > new_dist:
-#                         dist_heap[v] = new_dist
-#
-#     return [trgts_dists[trgt] for trgt in trgts], _
-#
-#
-# print(dijkstra(np.random.choice(nodes), np.random.choice(nodes, size=4)))
-
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import cpu_count
 
 class SnapGraph:
     def __init__(self, data_dir="./data/", verbose=True):
@@ -97,6 +18,7 @@ class SnapGraph:
         self.nodes = None
         self.edges = None
         self.graph = None
+        self.graph_in = None
 
         self.node_degrees = None
         self.avg_node_degree = None
@@ -108,6 +30,7 @@ class SnapGraph:
         self.cat_fname = "wiki-topcats-categories.txt"
         self.page_names_fname = "wiki-topcats-page-names.txt"
 
+        self.cpu_count = cpu_count()
         self.verbose = verbose
 
     @staticmethod
@@ -230,21 +153,26 @@ class SnapGraph:
     def build_graph(self):
         edges, cats, name = self.load_data_all()
         nodes = pd.unique(pd.concat((edges["v_start"], edges["v_end"])))
-        graph = defaultdict(dict)
+        # graph with outgoing edges for vertices
+        graph_out = defaultdict(dict)
+        # graph with incoming edges for vertices
+        graph_in = defaultdict(dict)
         node_degrees = defaultdict(int)
         pbar = tqdm(edges.iterrows(), total=edges.shape[0])
         pbar.set_description("Building graph")
         for i, edge in pbar:
             v_s, v_e = edge
             # add a weighted edge (here weight = 1)
-            graph[v_s][v_e] = 1
+            graph_out[v_s][v_e] = 1
+            graph_in[v_e][v_s] = 1
             node_degrees[v_s] += 1
 
         node_degrees = pd.DataFrame.from_dict(node_degrees, orient="index")
         self.node_degrees = node_degrees
         self.avg_node_degree = node_degrees.mean()
         self.nodes = nodes
-        self.graph = graph
+        self.graph = graph_out
+        self.graph_in = graph_in
         return
 
     def block_rank_category(self, inp_category):
@@ -258,29 +186,41 @@ class SnapGraph:
         block_rank_vec = heapdict()
         categ_sorted_nodes = dict()
 
-        pbar = tqdm(self.categories)
-        for cat in pbar:
-            pbar.set_description("Processing category %s" % cat)
-            if cat == inp_category:
-                continue
-            nodes_targ_cat = self.categories[cat]
-            shortest_paths = []
-            for n_st in nodes_source_cat:
-                dists = self.dijkstra(src=n_st, trgts=nodes_targ_cat)
-                for dist in dists:
-                    if dist != float("inf"):
-                        # if the node is unreachable he will be excluded from the
-                        # dist calc
-                        shortest_paths.append(dist)
-            if shortest_paths:  # if there are articles that can be reached
-                block_rank_vec[cat] = np.median(shortest_paths)
-            else:
-                block_rank_vec[cat] = float("inf")
+        inf = float("inf")
+        shortest_paths = defaultdict(list)
+        n_cpus = 2 # self.cpu_count
+        nodes_source_cat = nodes_source_cat[0: 1]
+        pbar = tqdm(total=len(nodes_source_cat))
+        distances = []
+        with ProcessPoolExecutor(max_workers=n_cpus) as executor:
+            dist_pools = list((executor.submit(self.dijkstra, src=n_src) for n_src in nodes_source_cat))
+            for future in as_completed(dist_pools):
+                pbar.update(1)
+                distances.append(future.result())
+        pbar.close()
+        for dists in distances:
+            if dists is not None:
+                for category, nodes in self.categories.items():
+                    if category != inp_category:
+                        for target in nodes:
+                            if target in self.graph_in:
+                                # if the target even has an incoming edge (reachable)
+                                dist = dists[target]
+                                if dist != inf:
+                                    shortest_paths[category].append(dist)
+
+                    if shortest_paths:  # if there are articles that can be reached
+                        block_rank_vec[category] = np.median(shortest_paths[category])
+                    else:
+                        block_rank_vec[category] = inf
 
         edges = self.load_data_edges(self.edges_fname)
         edges["score"] = 1
-        for categ in [inp_category] + list(self.categories.keys()):
-            categ_sorted_nodes[categ] = self._create_score_sort(categ, edges)
+        edges["in_sub"] = 0
+        categ_sorted_nodes[inp_category] = self._create_score_sort(inp_category, edges)
+        for categ in self.categories.keys():
+            if categ != inp_category:
+                categ_sorted_nodes[categ] = self._create_score_sort(categ, edges)
 
         output_list = []
         while block_rank_vec:
@@ -291,53 +231,46 @@ class SnapGraph:
     def _create_score_sort(self, category, edges_score):
         # get all the nodes in the category 0
         nodes_in_cat = self.categories[category]
-        rel_edges = edges_score[edges_score["v_end"].isin(nodes_in_cat)]
+        rel_edges = edges_score[((edges_score["v_end"].isin(nodes_in_cat)) &
+                                 (edges_score["v_start"].isin(nodes_in_cat))) |
+                                ((edges_score["in_sub"] == 1) &
+                                 (edges_score["v_end"].isin(nodes_in_cat)))]
 
-        scores = rel_edges.groupby(by=["v_end"]).sum()["score"]
+        scores = rel_edges.loc[:, ["v_end", "score"]].groupby(by=["v_end"]).sum()["score"]
 
         scores.name = "score"
 
         edges_score.set_index("v_end", inplace=True)
         edges_score.loc[scores.index, "score"] = scores
+        edges_score.loc[scores.index, "in_sub"] = 1
         edges_score.reset_index(inplace=True)
 
         return scores.sort_values(ascending=False)
 
-    def dijkstra(self, src, trgts=None):
+    def dijkstra(self, src):
         """
         Compute the shortest distance from the source vertex to the target
         according to the dijkstra algorithm.
 
         :param src: int, the number of the source vertex
-        :param trgts: list, the number of the target vertices that are wanted.
-                            If None, all distances will be calculated.
         :return: int, the distance
         """
 
-        if src not in self.nodes:
-            return [float("inf")] * len(trgts)
+        if src not in self.graph.keys():
+            return None
 
-        trgts_dists = dict()
-        rem_trgts = []
-        # some articles do not have any edge going in or going out.
-        # -> Unreachable
-        for trgt in trgts:
-            if trgt not in self.nodes:
-                trgts_dists[trgt] = float("inf")
-            else:
-                rem_trgts.append(trgt)
-
+        inf = float("inf")
         # a heap dictionary to keep track of the next closest
         # vertex in the nodes. Serves as a priority queue to speed
         # up the algorithm.
         dist_heap = heapdict()
-        for v in self.nodes:
-            dist_heap[v] = float("inf")
+        for v in self.graph_in.keys():
+            dist_heap[v] = inf
         dist_heap[src] = 0
 
         final_dists = dict()
 
-        for _ in range(len(self.nodes)):
+        while True:
 
             # Pick minimum distance vertex from
             # unprocessed vertices
@@ -346,13 +279,6 @@ class SnapGraph:
 
             # the dist to u is now final
             final_dists[u] = dist
-            if u in rem_trgts:
-                trgts_dists[u] = dist
-                rem_trgts.remove(u)
-
-            # if all target distances have been found
-            if not rem_trgts:
-                break
 
             # Update dist value of the adjacent vertices
             # of the picked vertex only if the current
@@ -366,7 +292,11 @@ class SnapGraph:
                         if dist_heap[v] > new_dist:
                             dist_heap[v] = new_dist
 
-        return [trgts_dists[trgt] for trgt in trgts]
+            # if priority queue is empty
+            if not dist_heap:
+                break
+
+        return final_dists
 
     def _download_file(self, url, fname=None, write_mode='wb', **kwargs):
         """
@@ -404,4 +334,4 @@ class SnapGraph:
 if __name__ == '__main__':
     snap_graph = SnapGraph()
     snap_graph.build_graph()
-    snap_graph.block_rank_category("English_footballers")
+    snap_graph.block_rank_category('American_Jews')
