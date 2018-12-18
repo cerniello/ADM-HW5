@@ -2,3 +2,5 @@
 *.xml
 data
 .idea
+__pycache__/Graph.cpython-36.pyc
+.ipynb_checkpoints/Untitled-checkpoint.ipynb

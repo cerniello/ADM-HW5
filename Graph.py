@@ -10,6 +10,8 @@ from collections import defaultdict
 from heapdict import heapdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import cpu_count
+from queue import Queue
+
 
 class SnapGraph:
     def __init__(self, data_dir="./data/", verbose=True):
@@ -176,21 +178,24 @@ class SnapGraph:
         return
 
     def block_rank_category(self, inp_category):
+        if self.categories is None:
+            self.build_graph()
+
         if inp_category not in self.categories:
             raise ValueError(f"Provided category {inp_category} not found in database.")
         else:
             nodes_source_cat = self.categories[inp_category]
-        if self.categories is None:
-            self.build_graph()
 
         block_rank_vec = heapdict()
         categ_sorted_nodes = dict()
 
         inf = float("inf")
         shortest_paths = defaultdict(list)
-        n_cpus = 2 # self.cpu_count
-        nodes_source_cat = nodes_source_cat[0: 1]
+        n_cpus = self.cpu_count
+
         pbar = tqdm(total=len(nodes_source_cat))
+        pbar.set_description("Computing for all source nodes")
+
         distances = []
         with ProcessPoolExecutor(max_workers=n_cpus) as executor:
             dist_pools = list((executor.submit(self.dijkstra, src=n_src) for n_src in nodes_source_cat))
@@ -198,22 +203,30 @@ class SnapGraph:
                 pbar.update(1)
                 distances.append(future.result())
         pbar.close()
+
+        # loop through all dicts of each source node to gather the distances to
+        # the categories
         for dists in distances:
-            if dists is not None:
+            if dists is not None:  # if src node had out_edges
                 for category, nodes in self.categories.items():
-                    if category != inp_category:
+                    if category != inp_category:  # skip the input category for computation
                         for target in nodes:
-                            if target in self.graph_in:
-                                # if the target even has an incoming edge (reachable)
+                            if target in self.graph_in:  # only nodes with in_edges have dists
                                 dist = dists[target]
                                 if dist != inf:
                                     shortest_paths[category].append(dist)
 
-                    if shortest_paths:  # if there are articles that can be reached
-                        block_rank_vec[category] = np.median(shortest_paths[category])
-                    else:
-                        block_rank_vec[category] = inf
+        # compute the medians for all categories
+        for category, nodes in self.categories.items():
+            if category != inp_category:
+                if shortest_paths:  # if there are articles that can be reached
+                    block_rank_vec[category] = np.median(shortest_paths[category])
+                else:
+                    block_rank_vec[category] = inf
 
+        # initiate the sorting algorithm. The loaded edges dataframe will be updated inplace
+        # with every call to _create_score_sort. No direct subgraph computation happening.
+        # The 'already included' nodes will be marked with 1 on 'in_sub'.
         edges = self.load_data_edges(self.edges_fname)
         edges["score"] = 1
         edges["in_sub"] = 0
@@ -225,6 +238,8 @@ class SnapGraph:
         output_list = []
         while block_rank_vec:
             category, dist = block_rank_vec.popitem()
+            # output elements will be tuples of
+            # (Category, Rank, Sorted_Nodes_list)
             output_list.append((category, dist, categ_sorted_nodes[category]))
         return output_list
 
@@ -247,13 +262,65 @@ class SnapGraph:
 
         return scores.sort_values(ascending=False)
 
+    def _compute_distances(self, inp_category):
+        # init node dicts
+        visited = {}  # visited = True/False
+        parent = {}  # parent of the node
+        distance = {}  # distance from C0
+
+        inf = float('inf')
+        # init the dict for each node in self.nodes
+        for v in self.graph_in.keys():
+            visited[v] = False
+            parent[v] = None
+            distance[v] = inf
+
+        pbar = tqdm(self.categories[inp_category])
+        # for each node in self.categories[inp_category]
+        for v in pbar:
+            # create a queue
+            Q = Queue()
+
+            # put the node in the queue
+            # each C0 node has 0 as distance!
+            Q.put(v)
+            visited[v] = True
+            dist = 0
+            distance[v] = dist
+
+            # if the queue is not empty
+            while not Q.empty():
+                # pick the next node
+                u = Q.get()
+                # increase the distance
+                dist += 1
+                # for each out_edge of u
+                for z in self.graph[u].keys():
+
+                    # if it's not visited update the values
+                    if not visited[z]:
+                        Q.put(z)
+                        visited[z] = True
+                        parent[z] = u
+                        distance[z] = dist
+                    else:
+                        # if the distance from the new c0 node
+                        # is less than the previous one
+                        # update the distance and the parent
+                        if distance[z] > dist:
+                            Q.put(z)
+                            parent[z] = u
+                            distance[z] = dist
+
+        return distance
+
     def dijkstra(self, src):
         """
-        Compute the shortest distance from the source vertex to the target
+        Compute the shortest distance from the source vertex to alll other nodes
         according to the dijkstra algorithm.
 
         :param src: int, the number of the source vertex
-        :return: int, the distance
+        :return: dict, the distances of each vertex to source
         """
 
         if src not in self.graph.keys():
