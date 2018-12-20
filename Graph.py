@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import os
 from os.path import isfile
 import requests
 from tqdm import tqdm
@@ -153,6 +152,11 @@ class SnapGraph:
         return page_names
 
     def build_graph(self):
+        """
+        Build the graph, loading automatically the data from the provided
+        dataset
+        :return:
+        """
         edges, cats, name = self.load_data_all()
         nodes = pd.unique(pd.concat((edges["v_start"], edges["v_end"])))
         # graph with outgoing edges for vertices
@@ -243,6 +247,90 @@ class SnapGraph:
             output_list.append((category, dist, categ_sorted_nodes[category]))
         return output_list
 
+    def block_rank_categories_bfs(self, inp_category):
+        """
+        make the block rank category according to bfs algorithm.
+        it uses the function _compute_distances() with the inp_category
+        given in input
+        :param inp_category: input category as a string (
+        :return list of tuples: block_ranking sorted by score [(C0,score),.. (Ci,score)]
+        """
+
+        # building block_ranking
+        # putting C0 as first element in the block_ranking
+        rank = [inp_category, 0]
+        block_rank_vec = [tuple(rank)]
+
+        # calling the function to get shortest paths from C0
+        shortest_paths = self._compute_distances(inp_category)
+
+        # define infinite value
+        # (some nodes are not connected to C0)
+        inf = float('inf')
+
+        pbar = tqdm(self.categories.keys())
+        pbar.set_description('Building block_ranking')
+
+        # for each category
+        for key in pbar:
+            # don't consider C0
+            if key == inp_category:
+                continue
+
+            Ci_nodes = self.categories[key]  # take nodes of Ci
+            Ci_distances = []  # Ci_distancies
+
+            # for each node in Ci_category
+            for node in Ci_nodes:
+                # if the node has edges and it's visited
+                if node in self.nodes and shortest_paths[node] != inf:
+                    # append its distance to the list of distancies
+                    Ci_distances.append(shortest_paths[node])
+
+            # not consider articles in common with C0
+            Ci_distances = [node for node in Ci_distances if node != 0]
+
+            # make new rank and append it to block_rank_vec
+            rank = [key, np.median(Ci_distances)]
+            block_rank_vec.append(tuple(rank))
+
+        block_rank_vec.sort(key=lambda x: x[1])
+
+
+        return block_rank_vec
+
+
+    def sort_categories_nodes(self, block_rank_vec):
+        """
+        initiate the sorting algorithm. The loaded edges dataframe will be updated inplace
+        with every call to _create_score_sort. No direct subgraph computation happening.
+        The 'already included' nodes will be marked with 1 on 'in_sub'.
+
+        :param block_rank_vec:
+        :return bl:
+        """
+
+        categ_sorted_nodes = dict()
+        edges = self.load_data_edges(self.edges_fname)
+        edges["score"] = 1
+        edges["in_sub"] = 0
+
+        pbar = tqdm(self.categories.keys())
+        pbar.set_description('Sorting categories nodes')
+
+        for categ in pbar:
+            categ_sorted_nodes[categ] = self._create_score_sort(categ, edges)
+
+        output_list = []
+
+        for category in block_rank_vec:
+            cat_name, score = category
+            # output elements will be tuples of
+            # (Category, Rank, Sorted_Nodes_list)
+            output_list.append((cat_name, score, categ_sorted_nodes[cat_name]))
+        return output_list
+
+
     def _create_score_sort(self, category, edges_score):
         # get all the nodes in the category 0
         nodes_in_cat = self.categories[category]
@@ -263,6 +351,16 @@ class SnapGraph:
         return scores.sort_values(ascending=False)
 
     def _compute_distances(self, inp_category):
+        """
+        According to the breadth-first search algorithm, compute for each
+        node of inp_category the distances with other nodes of other categories.
+        It takes the shortest distance between each point of the graph to C0.
+        It means that for a node V of a category (!= inp_category) it takes the
+        smallest distance value with a node U of inp_category
+
+        :param inp_category: category C0 in input (string)
+        :return dict, the distance of each vertex to the nearest inp_category node:
+        """
         # init node dicts
         visited = {}  # visited = True/False
         parent = {}  # parent of the node
@@ -270,19 +368,20 @@ class SnapGraph:
 
         inf = float('inf')
         # init the dict for each node in self.nodes
-        for v in self.graph_in.keys():
+        for v in self.nodes:
             visited[v] = False
             parent[v] = None
             distance[v] = inf
 
         pbar = tqdm(self.categories[inp_category])
+        pbar.set_description('Shortest_paths with \'%s\' nodes' %inp_category)
         # for each node in self.categories[inp_category]
         for v in pbar:
             # create a queue
             Q = Queue()
 
             # put the node in the queue
-            # each C0 node has 0 as distance!
+            # each C0 node has 0 as distance
             Q.put(v)
             visited[v] = True
             dist = 0
@@ -313,6 +412,8 @@ class SnapGraph:
                             distance[z] = dist
 
         return distance
+
+
 
     def dijkstra(self, src):
         """
